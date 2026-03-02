@@ -50,16 +50,29 @@ public class QRCodeContentPlacer : MonoBehaviour
             markerManager.markersChanged -= OnMarkersChanged;
     }
 
+    private readonly HashSet<TrackableId> _processedThisFrame = new();
+
     private void OnMarkersChanged(ARMarkersChangedEventArgs args)
     {
+        _processedThisFrame.Clear();
+
         foreach (var marker in args.added)
-            HandleAdded(marker);
+        {
+            if (_processedThisFrame.Add(marker.trackableId))
+                HandleAdded(marker);
+        }
 
         foreach (var marker in args.updated)
-            HandleUpdated(marker);
+        {
+            if (_processedThisFrame.Add(marker.trackableId))
+                HandleUpdated(marker);
+        }
 
         foreach (var marker in args.removed)
-            HandleRemoved(marker);
+        {
+            if (_processedThisFrame.Add(marker.trackableId))
+                HandleRemoved(marker);
+        }
     }
 
     private void HandleAdded(ARMarker marker)

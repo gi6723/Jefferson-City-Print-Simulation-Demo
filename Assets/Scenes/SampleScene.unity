@@ -247,7 +247,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 3409fcd01521a5e449226f22de470a2c, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  printerModelPrefab: {fileID: 0}
+  printerModelPrefab: {fileID: 7538837649465337169, guid: 3de956818a64a0e4e90f4697d18d8235, type: 3}
   fileSelectionUIPrefab: {fileID: 0}
   controlPanelUIPrefab: {fileID: 0}
   uiPositionOffset: {x: -0.5, y: 0, z: 0}
