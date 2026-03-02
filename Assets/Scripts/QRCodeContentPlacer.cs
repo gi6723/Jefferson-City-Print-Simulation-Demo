@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using Microsoft.MixedReality.OpenXR;
 using UnityEngine;
@@ -7,36 +8,47 @@ using UnityEngine.XR.ARSubsystems;
 [RequireComponent(typeof(ARMarkerManager))]
 public class QRCodeContentPlacer : MonoBehaviour
 {
-    [Header("Prefabs")]
-    [Tooltip("The 3D printer model prefab to spawn.")]
-    [SerializeField] private GameObject printerModelPrefab;
+    [Header("Pose Correction")]
+    [Tooltip("Rotation offset applied to spawned content to correct orientation.")]
+    [SerializeField] private Vector3 rotationOffset = new Vector3(-90f, 0f, 0f);
+    
+    [Header("Single QR Mode")]
+    [Tooltip("Only spawn when the decoded QR payload matches this exact string.")]
+    [SerializeField] private string requiredDecodedText = "Enjoy";
 
-    [Tooltip("The File Selection UI prefab (shown first).")]
-    [SerializeField] private GameObject fileSelectionUIPrefab;
+    [Tooltip("If true, trims whitespace before comparing decoded text.")]
+    [SerializeField] private bool trimDecoded = true;
 
-    [Tooltip("The Control Panel UI prefab (shown during simulation).")]
-    [SerializeField] private GameObject controlPanelUIPrefab;
+    [Tooltip("If true, comparison is case-sensitive.")]
+    [SerializeField] private bool caseSensitive = true;
 
-    [Header("Layout")]
-    [Tooltip("Local-space offset of the UI panel relative to the printer model (e.g. to the left).")]
-    [SerializeField] private Vector3 uiPositionOffset = new Vector3(-0.5f, 0f, 0f);
+    [Header("Content Prefab")]
+    [Tooltip("Prefab to spawn when the QR payload matches. Recommended: one prefab containing Ender2Pro + UI offset to the left.")]
+    [SerializeField] private GameObject contentPrefab;
+
+    [Header("Behavior")]
+    [Tooltip("If true, continuously updates the spawned object's transform from the marker while tracked.")]
+    [SerializeField] private bool followUpdates = true;
+
+    [Tooltip("Only show content when marker trackingState is Tracking.")]
+    [SerializeField] private bool requireFullTracking = true;
+
+    [Tooltip("If true, keep content visible when tracking is lost after being seen (freezes last pose).")]
+    [SerializeField] private bool keepVisibleWhenTrackingLost = true;
+
+    [Tooltip("If true, keep content visible after a marker is removed (freezes last pose).")]
+    [SerializeField] private bool keepAliveOnRemoved = true;
+
+    // TrackableId -> instance
+    private readonly Dictionary<TrackableId, GameObject> spawnedById = new();
+    private readonly Dictionary<TrackableId, string> decodedById = new();
+
+    // Stable key (decoded) -> instance + last pose
+    private readonly Dictionary<string, GameObject> spawnedByKey = new();
+    private readonly Dictionary<string, Pose> lastPoseByKey = new();
+    private readonly Dictionary<string, bool> everTrackedByKey = new();
 
     private ARMarkerManager markerManager;
-
-    // Spawned instances
-    private GameObject spawnedPrinter;
-    private GameObject spawnedFileSelectionUI;
-    private GameObject spawnedControlPanelUI;
-
-    // The QR payload we respond to
-    private const string TARGET_QR_PAYLOAD = "Enjoy";
-
-    // Track whether QR is currently visible
-    private bool isSpawned = false;
-
-    // Which UI phase we're in
-    public enum DemoPhase { FileSelection, ControlPanel }
-    private DemoPhase currentPhase = DemoPhase.FileSelection;
 
     private void Awake()
     {
@@ -50,118 +62,154 @@ public class QRCodeContentPlacer : MonoBehaviour
             markerManager.markersChanged -= OnMarkersChanged;
     }
 
-    private readonly HashSet<TrackableId> _processedThisFrame = new();
-
     private void OnMarkersChanged(ARMarkersChangedEventArgs args)
     {
-        _processedThisFrame.Clear();
-
         foreach (var marker in args.added)
-        {
-            if (_processedThisFrame.Add(marker.trackableId))
-                HandleAdded(marker);
-        }
+            HandleAdded(marker);
 
-        foreach (var marker in args.updated)
+        if (followUpdates)
         {
-            if (_processedThisFrame.Add(marker.trackableId))
+            foreach (var marker in args.updated)
                 HandleUpdated(marker);
         }
 
         foreach (var marker in args.removed)
-        {
-            if (_processedThisFrame.Add(marker.trackableId))
-                HandleRemoved(marker);
-        }
+            HandleRemoved(marker);
     }
 
     private void HandleAdded(ARMarker marker)
     {
         var decoded = marker.GetDecodedString();
 
-        if (decoded != TARGET_QR_PAYLOAD)
+        if (!IsMatch(decoded))
             return;
 
-        if (isSpawned)
+        if (contentPrefab == null)
+        {
+            Debug.LogWarning("[QRCodeContentPlacer] contentPrefab is not assigned.");
             return;
+        }
 
-        // Spawn printer
-        spawnedPrinter = Instantiate(printerModelPrefab);
+        var key = Normalize(decoded);
 
-        // Spawn both UIs, position them to the left of the printer
-        spawnedFileSelectionUI = Instantiate(fileSelectionUIPrefab);
-        spawnedControlPanelUI = Instantiate(controlPanelUIPrefab);
+        // Reuse if we already spawned for this payload.
+        if (!spawnedByKey.TryGetValue(key, out var instance) || instance == null)
+        {
+            instance = Instantiate(contentPrefab);
+            instance.name = $"QRContent_{key}";
+            spawnedByKey[key] = instance;
+        }
 
-        ApplyPose(marker);
+        spawnedById[marker.trackableId] = instance;
+        decodedById[marker.trackableId] = decoded;
 
-        // Start in FileSelection phase
-        SetPhase(DemoPhase.FileSelection);
+        ApplyPose(marker, instance, key);
 
-        isSpawned = true;
-
-        Debug.Log("[QRCodeContentPlacer] Spawned printer and UI.");
+        Debug.Log($"[QRCodeContentPlacer] Matched '{requiredDecodedText}'. Spawned/updated content at QR pose. id={marker.trackableId}");
     }
 
     private void HandleUpdated(ARMarker marker)
     {
-        if (!isSpawned) return;
+        if (!spawnedById.TryGetValue(marker.trackableId, out var instance) || instance == null)
+            return;
 
-        var decoded = marker.GetDecodedString();
-        if (decoded != TARGET_QR_PAYLOAD) return;
+        var decoded = decodedById.TryGetValue(marker.trackableId, out var d) ? d : marker.GetDecodedString();
+        if (!IsMatch(decoded))
+            return;
 
-        if (marker.trackingState == TrackingState.Tracking)
-            ApplyPose(marker);
+        var key = Normalize(decoded);
+        ApplyPose(marker, instance, key);
     }
 
     private void HandleRemoved(ARMarker marker)
     {
-        // Keep content alive after QR is removed - freeze last known pose
-        Debug.Log("[QRCodeContentPlacer] QR removed - content remains at last pose.");
+        if (!spawnedById.TryGetValue(marker.trackableId, out var instance) || instance == null)
+            return;
+
+        var decoded = decodedById.TryGetValue(marker.trackableId, out var d) ? d : marker.GetDecodedString();
+        var key = Normalize(decoded);
+
+        spawnedById.Remove(marker.trackableId);
+        decodedById.Remove(marker.trackableId);
+
+        if (!IsMatch(decoded))
+            return;
+
+        if (keepAliveOnRemoved)
+        {
+            // Freeze at last good pose (if known)
+            if (!requireFullTracking || (everTrackedByKey.TryGetValue(key, out var ever) && ever))
+                ApplyFrozenPose(key, instance);
+
+            return;
+        }
+
+        Destroy(instance);
+        spawnedByKey.Remove(key);
+        lastPoseByKey.Remove(key);
+        everTrackedByKey.Remove(key);
     }
 
-    private void ApplyPose(ARMarker marker)
+    private void ApplyPose(ARMarker marker, GameObject instance, string key)
     {
-        if (spawnedPrinter == null) return;
+        // Cache last pose when tracked (or whenever full tracking not required)
+        if (marker.trackingState == TrackingState.Tracking)
+        {
+            everTrackedByKey[key] = true;
+            lastPoseByKey[key] = new Pose(marker.transform.position, marker.transform.rotation);
+        }
+        else if (!requireFullTracking)
+        {
+            lastPoseByKey[key] = new Pose(marker.transform.position, marker.transform.rotation);
+        }
 
-        var pos = marker.transform.position;
-        var rot = marker.transform.rotation;
+        // Visibility rules
+        if (requireFullTracking && marker.trackingState != TrackingState.Tracking)
+        {
+            if (keepVisibleWhenTrackingLost && everTrackedByKey.TryGetValue(key, out var ever) && ever)
+            {
+                ApplyFrozenPose(key, instance);
+            }
+            else
+            {
+                instance.SetActive(false);
+            }
+            return;
+        }
 
-        spawnedPrinter.transform.SetPositionAndRotation(pos, rot);
+        if (!instance.activeSelf)
+            instance.SetActive(true);
 
-        // Position UI to the left of the printer in world space
-        var uiPos = pos + rot * uiPositionOffset;
-        spawnedFileSelectionUI.transform.SetPositionAndRotation(uiPos, rot);
-        spawnedControlPanelUI.transform.SetPositionAndRotation(uiPos, rot);
+        var correctedRot = marker.transform.rotation * Quaternion.Euler(rotationOffset);
+        instance.transform.SetPositionAndRotation(marker.transform.position, correctedRot);
     }
 
-    /// <summary>
-    /// Call this from your File Selection UI when the user picks a file and starts the simulation.
-    /// </summary>
-    public void SwitchToControlPanel()
+    private void ApplyFrozenPose(string key, GameObject instance)
     {
-        SetPhase(DemoPhase.ControlPanel);
+        if (!instance.activeSelf)
+            instance.SetActive(true);
+
+        if (lastPoseByKey.TryGetValue(key, out var pose))
+            instance.transform.SetPositionAndRotation(pose.position, pose.rotation * Quaternion.Euler(rotationOffset));    }
+
+    private bool IsMatch(string decoded)
+    {
+        if (string.IsNullOrEmpty(decoded) || string.IsNullOrEmpty(requiredDecodedText))
+            return false;
+
+        var a = Normalize(decoded);
+        var b = Normalize(requiredDecodedText);
+
+        return caseSensitive
+            ? string.Equals(a, b, StringComparison.Ordinal)
+            : string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary>
-    /// Call this to go back to File Selection (e.g. simulation ends or reset).
-    /// </summary>
-    public void SwitchToFileSelection()
+    private string Normalize(string s)
     {
-        SetPhase(DemoPhase.FileSelection);
-    }
+        if (s == null)
+            return null;
 
-    private void SetPhase(DemoPhase phase)
-    {
-        currentPhase = phase;
-
-        bool showFileSelection = (phase == DemoPhase.FileSelection);
-
-        if (spawnedFileSelectionUI != null)
-            spawnedFileSelectionUI.SetActive(showFileSelection);
-
-        if (spawnedControlPanelUI != null)
-            spawnedControlPanelUI.SetActive(!showFileSelection);
-
-        Debug.Log($"[QRCodeContentPlacer] Phase switched to: {phase}");
+        return trimDecoded ? s.Trim() : s;
     }
 }
