@@ -251,7 +251,7 @@ MonoBehaviour:
   requiredDecodedText: Enjoy
   trimDecoded: 1
   caseSensitive: 1
-  contentPrefab: {fileID: 7538837649465337169, guid: 3de956818a64a0e4e90f4697d18d8235, type: 3}
+  contentPrefab: {fileID: 851592732971775061, guid: f840e12685dd42948ada0d4774cc06c3, type: 3}
   followUpdates: 1
   requireFullTracking: 1
   keepVisibleWhenTrackingLost: 1
