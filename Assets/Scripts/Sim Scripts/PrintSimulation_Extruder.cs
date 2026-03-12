@@ -29,6 +29,8 @@ namespace mumachiningmr.xr3dprintersimulator
         [Tooltip("Additional Y offset applied ONLY to the extruder head visual, independent of filament origin. " +
                  "Use this to align the nozzle tip with where filament spawns if the nozzle pivot is off.")]
         [SerializeField] private float extruderHeadOffsetMeters = 0.0f;
+        [SerializeField] private float extruderHeadOffsetZMeters = 0.0f;
+        [SerializeField] private float extruderHeadOffsetXMeters = 0.0f;
 
         [Tooltip("How many completed layers to keep visible at once. Older layers beyond this count " +
                  "are destroyed to keep GPU memory low. 5 is a safe starting value for HoloLens 2.")]
@@ -36,6 +38,9 @@ namespace mumachiningmr.xr3dprintersimulator
 
         [Header("Simulation")]
         [SerializeField] private float printSpeed = 5f;
+        [Header("Speed Slider Range")]
+        [SerializeField] private float sliderSpeedMin = 0.5f;
+        [SerializeField] private float sliderSpeedMax = 6.0f;
 
         [Tooltip("Rapid mode: how many gcode lines to process per frame. Higher = faster.")]
         [SerializeField] private int rapidLinesPerFrame = 200;
@@ -141,7 +146,23 @@ namespace mumachiningmr.xr3dprintersimulator
 
         public void setPrintSpeed(float newSpeed)
         {
-            printSpeed = Mathf.Max(0.01f, newSpeed) * 0.02f;
+            float mapped;
+            if (newSpeed <= 1.0f)
+                mapped = Mathf.Lerp(sliderSpeedMin, sliderSpeedMax, Mathf.Clamp01(newSpeed));
+            else
+                mapped = Mathf.Max(0.05f, newSpeed * 0.02f);
+            if (Mathf.Approximately(mapped, printSpeed)) return;
+            printSpeed = mapped;
+            Debug.Log($"[PrintSimulation_Extruder] setPrintSpeed in={newSpeed:0.000} -> {printSpeed:0.000} m/s");
+        }
+
+        public void StopSimulation()
+        {
+            Debug.Log("[PrintSimulation_Extruder] StopSimulation() called.");
+            StopAllCoroutines();
+            printSpeed = sliderSpeedMin;
+            clearPrintData(keepLoadedGcode: false);
+            // nozzle Y/Z untouched — only X is driven during sim
         }
 
         public void showLayer(int newLayer)
@@ -215,18 +236,24 @@ namespace mumachiningmr.xr3dprintersimulator
         {
             isGradualSim = true; isRapidSim = false;
             locateOrigin();
-            if (extruderHead != null) extruderHead.position = origin + Vector3.up * extruderHeadOffsetMeters;
+            // nozzle Y/Z untouched — only X is driven during sim
             fromCoord = origin; toCoord = origin;
             Debug.Log($"[PrintSimulation_Extruder] Gradual sim begin. origin={origin} speed={printSpeed}");
 
             while (gcodeLineIndex < gcodeLines.Length)
             {
                 processNextGCodeLine();
+                // Only drive nozzle local X — it slides on the X rail only.
+                // Y and Z in local space never change (bed lowers in real life, not in sim).
                 if (extruderHead != null)
-                    extruderHead.position = Vector3.MoveTowards(
-                        extruderHead.position,
-                        extruderCoordinate + Vector3.up * extruderHeadOffsetMeters,
-                        printSpeed * Time.deltaTime);
+                {
+                    // Drive local X to track filament, drive local Y via extruderHeadOffsetMeters
+                    Transform root = extruderHead.parent != null ? extruderHead.parent : extruderHead;
+                    Vector3 localTarget = root.InverseTransformPoint(extruderCoordinate);
+                    Vector3 localCurrent = extruderHead.localPosition;
+                    float targetLocalX = Mathf.MoveTowards(localCurrent.x, localTarget.x, printSpeed * Time.deltaTime);
+                    extruderHead.localPosition = new Vector3(targetLocalX + extruderHeadOffsetXMeters, localTarget.y + extruderHeadOffsetMeters, localTarget.z + extruderHeadOffsetZMeters);
+                }
                 yield return null;
             }
             FinalizeSim();
@@ -236,7 +263,7 @@ namespace mumachiningmr.xr3dprintersimulator
         {
             isGradualSim = false; isRapidSim = true;
             locateOrigin();
-            if (extruderHead != null) extruderHead.position = origin + Vector3.up * extruderHeadOffsetMeters;
+            // nozzle Y/Z untouched — only X is driven during sim
             fromCoord = origin; toCoord = origin;
             Debug.Log($"[PrintSimulation_Extruder] Rapid sim begin. origin={origin} linesPerFrame={rapidLinesPerFrame}");
 
@@ -252,7 +279,7 @@ namespace mumachiningmr.xr3dprintersimulator
 
         private void FinalizeSim()
         {
-            if (extruderHead != null) extruderHead.position = origin + Vector3.up * extruderHeadOffsetMeters;
+            // nozzle Y/Z untouched — only X is driven during sim
             totalLayers = Mathf.Max(totalLayers, currentLayer);
             isRunning = false;
             modelComplete = true;
@@ -486,21 +513,26 @@ namespace mumachiningmr.xr3dprintersimulator
             }
             else { wy = stepValue; }
 
+            // Transform gcode offsets through PrinterRoot's rotation so QR-anchor
+            // orientation is respected. gcode Y -> local X axis, gcode X -> local Z axis
+            // (matches the working world-axis mapping when rotation is identity).
+            Transform root = transform.parent != null ? transform.parent : transform;
+
             if (isAbsolute)
             {
-                return new Vector3(
-                    float.IsNaN(wx) ? fromCoord.x : origin.x + wx,
-                    float.IsNaN(wy) ? fromCoord.y : wy,
-                    float.IsNaN(wz) ? fromCoord.z : origin.z + wz
-                );
+                Vector3 pos = origin;
+                if (!float.IsNaN(wx)) pos += root.TransformDirection(wx, 0f, 0f);
+                if (!float.IsNaN(wz)) pos += root.TransformDirection(0f, 0f, wz);
+                pos.y = float.IsNaN(wy) ? fromCoord.y : wy;
+                return pos;
             }
             else
             {
-                return fromCoord + new Vector3(
-                    float.IsNaN(wx) ? 0f : wx,
-                    float.IsNaN(wy) ? 0f : (wy - fromCoord.y),
-                    float.IsNaN(wz) ? 0f : wz
-                );
+                Vector3 delta = Vector3.zero;
+                if (!float.IsNaN(wx)) delta += root.TransformDirection(wx, 0f, 0f);
+                if (!float.IsNaN(wz)) delta += root.TransformDirection(0f, 0f, wz);
+                delta.y = float.IsNaN(wy) ? 0f : (wy - fromCoord.y);
+                return fromCoord + delta;
             }
         }
 
