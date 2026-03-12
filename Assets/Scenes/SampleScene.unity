@@ -252,7 +252,7 @@ MonoBehaviour:
   trimDecoded: 1
   caseSensitive: 1
   contentPrefab: {fileID: 851592732971775061, guid: f840e12685dd42948ada0d4774cc06c3, type: 3}
-  followUpdates: 1
+  followUpdates: 0
   requireFullTracking: 1
   keepVisibleWhenTrackingLost: 1
   keepAliveOnRemoved: 1

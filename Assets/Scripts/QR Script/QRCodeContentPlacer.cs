@@ -97,6 +97,7 @@ public class QRCodeContentPlacer : MonoBehaviour
         {
             instance = Instantiate(contentPrefab);
             instance.name = $"QRContent_{key}";
+            Debug.Log($"[QRPlacer] Just after Instantiate: scale={instance.transform.lossyScale} localScale={instance.transform.localScale}");
             spawnedByKey[key] = instance;
         }
 
@@ -104,6 +105,7 @@ public class QRCodeContentPlacer : MonoBehaviour
         decodedById[marker.trackableId] = decoded;
 
         ApplyPose(marker, instance, key);
+        Debug.Log($"[QRPlacer] After ApplyPose: scale={instance.transform.lossyScale} localScale={instance.transform.localScale} parent={(instance.transform.parent ? instance.transform.parent.name : "NULL")}");
 
         Debug.Log($"[QRCodeContentPlacer] Matched '{requiredDecodedText}'. Spawned/updated content at QR pose. id={marker.trackableId}");
     }

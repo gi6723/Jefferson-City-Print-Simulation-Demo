@@ -5,6 +5,9 @@ using MixedReality.Toolkit;
 
 public class GcodeSelectionController : MonoBehaviour
 {
+    [Header("Selection Highlight (optional, match by index)")]
+    [SerializeField] private List<GameObject> selectionHighlights = new();
+    
     [Header("Presets (match by index)")]
     [SerializeField] private List<PrintJobPreset> jobs = new();
 
@@ -18,13 +21,8 @@ public class GcodeSelectionController : MonoBehaviour
     [SerializeField] private Transform previewAnchor;
 
     [Header("Preview Transform (relative to PreviewAnchor)")]
-    [Tooltip("Local position of the preview relative to PreviewAnchor.")]
     [SerializeField] private Vector3 previewLocalPosition = new Vector3(0f, 0f, 0.03f);
-
-    [Tooltip("Rotation correction applied to the spawned preview (use this to stand OBJs upright).")]
     [SerializeField] private Vector3 previewLocalEuler = new Vector3(-90f, 0f, 0f);
-
-    [Tooltip("Local scale applied to the spawned preview (tune per your import scale).")]
     [SerializeField] private Vector3 previewLocalScale = Vector3.one;
 
     private int selectedIndex = -1;
@@ -54,10 +52,13 @@ public class GcodeSelectionController : MonoBehaviour
             var interactable = jobButtons[i];
             if (interactable == null) continue;
 
-            // Remove previous listeners to avoid stacking in playmode
             interactable.OnClicked.RemoveAllListeners();
             interactable.OnClicked.AddListener(() => Select(idx));
         }
+
+        // Nice UX: select first job by default so Start can work immediately
+        if (selectedIndex < 0 && jobs.Count > 0)
+            Select(0);
     }
 
     private void Select(int idx)
@@ -83,12 +84,17 @@ public class GcodeSelectionController : MonoBehaviour
         }
 
         previewInstance = Instantiate(prefab, previewAnchor);
-
-        // Center on anchor + push slightly forward (avoid clipping) + apply upright correction
         previewInstance.transform.localPosition = previewLocalPosition;
         previewInstance.transform.localRotation = Quaternion.Euler(previewLocalEuler);
         previewInstance.transform.localScale = previewLocalScale;
-
+        
+        // Toggle selection highlight
+        int hN = Mathf.Min(selectionHighlights.Count, jobs.Count);
+        for (int i = 0; i < hN; i++)
+        {
+            if (selectionHighlights[i] != null)
+                selectionHighlights[i].SetActive(i == idx);
+        }
         Debug.Log($"[GcodeSelectionController] Selected '{GetSelectedName()}', preview spawned.");
     }
 
@@ -99,4 +105,14 @@ public class GcodeSelectionController : MonoBehaviour
             ? jobs[selectedIndex].displayName
             : (jobs[selectedIndex].gcodeFile != null ? jobs[selectedIndex].gcodeFile.name : "Unnamed");
     }
+
+    // ✅ NEW: expose the selected gcode TextAsset
+    public TextAsset GetSelectedGcode()
+    {
+        if (selectedIndex < 0 || selectedIndex >= jobs.Count) return null;
+        return jobs[selectedIndex].gcodeFile;
+    }
+
+    // ✅ NEW: optional safety check
+    public bool HasSelection => selectedIndex >= 0 && selectedIndex < jobs.Count;
 }
